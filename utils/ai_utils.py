@@ -68,6 +68,39 @@ Rules:
 """
 
 
+def try_model(client, model: str, content: list) -> dict | None:
+    """Try a single model. Returns parsed dict on success, None on any failure."""
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            max_tokens=2000,
+            messages=[{"role": "user", "content": content}],
+        )
+
+        # Validate response structure
+        if (
+            not response
+            or not response.choices
+            or not response.choices[0].message
+            or not response.choices[0].message.content
+        ):
+            return None
+
+        raw = response.choices[0].message.content.strip()
+        if not raw:
+            return None
+
+        # Strip markdown fences
+        raw = re.sub(r"^```json\s*", "", raw)
+        raw = re.sub(r"^```\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+
+        return json.loads(raw)
+
+    except (json.JSONDecodeError, Exception):
+        return None
+
+
 def extract_fields_from_document(fields: list, file_bytes: bytes, file_type: str) -> dict:
     client = get_client()
     prompt = build_extraction_prompt(fields)
@@ -93,7 +126,6 @@ def extract_fields_from_document(fields: list, file_bytes: bytes, file_type: str
 
     content.append({"type": "text", "text": prompt})
 
-    # Try multiple free vision models in order until one works
     FREE_VISION_MODELS = [
         "google/gemma-4-31b-it:free",
         "meta-llama/llama-4-maverick:free",
@@ -101,31 +133,10 @@ def extract_fields_from_document(fields: list, file_bytes: bytes, file_type: str
         "openrouter/free",
     ]
 
-    try:
-        response = None
-        last_error = None
+    for model in FREE_VISION_MODELS:
+        result = try_model(client, model, content)
+        if result is not None:
+            return result
 
-        for model in FREE_VISION_MODELS:
-            try:
-                response = client.chat.completions.create(
-                    model=model,
-                    max_tokens=2000,
-                    messages=[{"role": "user", "content": content}],
-                )
-                break  # success — stop trying
-            except Exception as model_err:
-                last_error = model_err
-                continue  # try next model
-
-        if response is None:
-            raise RuntimeError(f"All models failed. Last error: {last_error}")
-
-        raw = response.choices[0].message.content.strip()
-        raw = re.sub(r"^```json\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
-
-    except json.JSONDecodeError:
-        return {f["id"]: {"value": "", "confidence": "missing"} for f in fields}
-    except Exception as e:
-        raise RuntimeError(f"AI extraction failed: {str(e)}")
+    # All models failed — return blank results instead of crashing
+    return {f["id"]: {"value": "", "confidence": "missing"} for f in fields}
